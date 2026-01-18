@@ -43,7 +43,7 @@ USE_MARKER = True  # 启用Marker模式进行测试
 
 # Architect分批处理配置
 # Marker会逐页识别整个PDF，然后Architect每N页分批提取问题
-PAGES_PER_BATCH = 3  # 每批处理的页数，建议2-4页
+PAGES_PER_BATCH = 5  # 每批处理的页数，建议2-5页
 
 # --- PDF Extraction Strategy ---
 # Using PyMuPDF (fitz) for text extraction
@@ -56,7 +56,7 @@ PAGES_PER_BATCH = 3  # 每批处理的页数，建议2-4页
 class SubQuestion(BaseModel):
     """子问题模型，包含问题类型和字数要求"""
     question: str = Field(..., description="具体的探究性问题")
-    question_type: str = Field(..., description="问题类型: 'phenomenon'(现象描述/'是什么') | 'mechanism'(机理推导) | 'critique'(目的和批判/'为什么')")
+    question_type: str = Field(..., description="问题类型: 'what'(是什么/内容描述) | 'principle'(原理/机制推导) | 'phenomenon'(现象) | 'mechanism'(机理) | 'critique'(批判)")
     min_words: int = Field(default=0)
     max_words: int = Field(default=10000)
     validate_min: int = Field(default=0)  # 验证最小值
@@ -65,21 +65,33 @@ class SubQuestion(BaseModel):
     def __init__(self, **data):
         super().__init__(**data)
         # 根据问题类型自动设置字数要求
-        if self.question_type == "phenomenon":
+        if self.question_type == "what":
+            # 是什么：输出600-2000字，验证500-3000字
+            self.min_words = 600
+            self.max_words = 2000
+            self.validate_min = 500
+            self.validate_max = 3000
+        elif self.question_type == "principle":
+            # 原理：输出600-2500字，验证500-3500字
+            self.min_words = 600
+            self.max_words = 2500
+            self.validate_min = 500
+            self.validate_max = 3500
+        elif self.question_type == "phenomenon":
             self.min_words = 1000
-            self.max_words = 3000
+            self.max_words = 2000
             self.validate_min = 600
-            self.validate_max = 4000
+            self.validate_max = 3000
         elif self.question_type == "mechanism":
             self.min_words = 1000
-            self.max_words = 3000
+            self.max_words = 2500
             self.validate_min = 600
             self.validate_max = 4000
         elif self.question_type == "critique":
             self.min_words = 500
             self.max_words = 1500
             self.validate_min = 400
-            self.validate_max = 2000
+            self.validate_max = 2500
 
 class SectionIntent(BaseModel):
     section_title: str = Field(..., description="Title of the section or figure index")
@@ -593,50 +605,68 @@ def validate_and_fix_priority_questions(outline: Outline, figures_list: List[dic
     """
     fixed_count = 0
     
-    def has_priority_question(sub_questions: List[SubQuestion]) -> bool:
-        """检查是否有优先问题"""
-        if not sub_questions:
+    def has_priority_questions(sub_questions: List[SubQuestion]) -> bool:
+        """检查是否有两个优先问题（是什么+原理）"""
+        if len(sub_questions) < 2:
             return False
         
-        first_q = sub_questions[0].question
-        has_what = any(k in first_q for k in ['是什么', '展示了什么', '代表什么', '什么内容', '什么含义'])
-        has_why = any(k in first_q for k in ['原理', '逻辑', '机制', '流程'])
+        # 检查前两个问题是否是'what'和'principle'类型
+        has_what = sub_questions[0].question_type == 'what'
+        has_principle = sub_questions[1].question_type == 'principle'
         
-        return '【优先】' in first_q or (has_what and has_why)
+        return has_what and has_principle
     
-    def create_priority_question(section: SectionIntent) -> SubQuestion:
-        """为section创建优先问题"""
+    def create_priority_questions(section: SectionIntent) -> List[SubQuestion]:
+        """为section创建两个独立的优先问题：是什么+原理"""
         title = section.section_title
+        questions = []
         
         if section.type == 'figure':
-            question = f"【优先】{title}展示了什么内容？图中各个元素代表什么含义？其工作原理/流程是怎样的？"
+            # 问题1：是什么
+            what_q = SubQuestion(
+                question=f"{title}展示了什么内容？图中各个元素（坐标轴、曲线、数据点、标注等）分别代表什么含义？",
+                question_type="what"
+            )
+            # 问题2：原理
+            principle_q = SubQuestion(
+                question=f"{title}的工作原理/流程是怎样的？图中展示的机制、过程、或关系是如何运作的？",
+                question_type="principle"
+            )
+            questions = [what_q, principle_q]
+            
         elif section.type == 'equation':
-            question = f"【优先】{title}的数学表达式是什么？各个符号代表什么含义？这个公式的计算原理和推导逻辑是怎样的？"
-        else:
-            return None
+            # 问题1：是什么
+            what_q = SubQuestion(
+                question=f"{title}的完整数学表达式是什么？各个符号、变量、参数分别代表什么含义？",
+                question_type="what"
+            )
+            # 问题2：原理
+            principle_q = SubQuestion(
+                question=f"{title}的推导逻辑和计算原理是怎样的？这个公式的理论基础是什么？如何从基本假设推导出来？",
+                question_type="principle"
+            )
+            questions = [what_q, principle_q]
         
-        return SubQuestion(
-            question=question,
-            question_type="phenomenon",
-            min_words=1000,
-            max_words=3000
-        )
+        return questions
     
     # 验证并修复每个section
     for section in outline.sections:
         if section.type in ['figure', 'equation']:
-            if not has_priority_question(section.sub_questions):
-                # 创建并插入优先问题到第一位
-                priority_q = create_priority_question(section)
-                if priority_q:
-                    section.sub_questions.insert(0, priority_q)
+            if not has_priority_questions(section.sub_questions):
+                # 创建并插入两个优先问题到最前面
+                priority_qs = create_priority_questions(section)
+                if priority_qs:
+                    # 移除旧的优先问题（如果有）
+                    existing_others = [q for q in section.sub_questions if q.question_type not in ['what', 'principle']]
+                    # 插入新的优先问题+保留其他问题
+                    section.sub_questions = priority_qs + existing_others
                     fixed_count += 1
-                    print(f"  🔧 自动补充优先问题: {section.section_title}")
+                    print(f"  🔧 自动补充优先问题: {section.section_title} (是什么+原理)")
     
     if fixed_count > 0:
-        print(f"✅ 优先问题验证完成: 自动补充了{fixed_count}个遗漏的优先问题")
+        print(f"✅ 优先问题验证完成: 自动补充了{fixed_count}个section的优先问题（每个包含'是什么'+'原理'两个问题）")
     else:
-        print(f"✅ 优先问题验证通过: 所有figure/equation section都包含优先问题")
+        print(f"✅ 优先问题验证通过: 所有figure/equation section都包含'是什么'和'原理'两个优先问题")
     
     return outline
 
@@ -716,16 +746,25 @@ class ArchitectAgent:
 
         ### ⚠️ 第一优先级：完整覆盖所有视觉元素
         **强制要求**：在设计任何问题之前，你必须：
-        1. **图表清单核查**：检查下方提供的图表清单，每一个图、表、公式都必须在你的大纲中有对应的section
+        1. **图表清单核查**：检查下方提供的图表清单，每一个图、表都必须在你的大纲中有对应的section
         2. **逐一对应**：为每个图表创建专门的分析section（如"3.1.1 Fig 1 任务范式"，"3.1.2 Fig 2 神经响应"）
-        3. **公式追踪**：如果论文中出现编号公式（Equation 1, 2...），必须为每个公式创建分析section
+        3. **公式主动扫描**：⚠️ 重要！你必须**主动扫描文本**寻找编号公式：
+           - 寻找模式："Equation 1", "Eq. 2", 或独立编号如"(1)", "(2)"...
+           - Marker已将公式转换为LaTeX格式（$$...$$），编号通常在公式下方或旁边
+           - 为每组1-3个相关公式创建分析section（如"3.2.1 Equation 1-3: 计算公式"）
+           - **即使图表清单中没有公式，也要扫描文本！**
 
         {figures_text}
 
-        ### 第二优先级：IMRAD结构完整性
+        ### 第二优先级：IMRAD + Appendix 结构完整性
         1. {appendix_instruction}
-        2. **结构自检**: 你的大纲必须完整覆盖学术论文的核心结构 (IMRAD: Introduction, Methods, Results, Discussion)。
+        2. **结构自检**: 你的大纲必须完整覆盖学术论文的核心结构：
+           - **IMRAD**: Introduction, Methods, Results, Discussion
+           - **Appendix/Supplementary**: 如果论文包含附录或补充材料（Supplementary Materials），必须为其创建专门的section
         3. **环节细化**: 每个一级环节（如Methods）必须包含至少2个二级子环节。
+        4. **附录要求**：
+           - 附录中的所有图表（Supplementary Figure, Figure S1, Table S1等）都必须分析
+           - 附录中的公式、算法、详细推导都要创建对应section
 
         ### 第三优先级：多维度深度提问
         在确保覆盖完整性后，对每个section生成2-4个不同维度的子问题。
@@ -759,28 +798,59 @@ class ArchitectAgent:
         - `2. 背景 (Introduction)`
         - `2.1 核心假设与理论分歧`
         - `3. 实验设计 (Methods)`
-        - `3.1 关键变量与 Visual Stimuli`
-        - `3.1.1 Fig 1 任务范式图解` ← **每个图表必须有这样的section！**
-        - `3.1.2 Equation 1: logLR计算公式` ← **每个编号公式必须有section！**
+        - `3.1 实验范式与刺激`
+        - `3.1.1 Fig 1a-c: 任务范式的三个条件` ← **子图必须分组**
+        - `3.1.2 Fig 2: 刺激材料示例`
+        - `3.1.3 Equation 1-2: logLR计算` ← **相关公式可以分组**
+        - `4. 结果 (Results)`
+        - `4.1 行为数据`
+        - `4.1.1 Fig 3a-d: 准确率分析` ← **子图分组**
+        - `4.1.2 Fig 4-5: 反应时与学习曲线` ← **主题相关图表可选分组**
+        - `6. 附录分析 (Appendix/Supplementary)`
+        - `6.1 Figure S1a-b: 补充实验数据` ← **补充材料的子图也要分组**
+        - `6.2 详细算法推导`
 
         ### 2. 图表分析section的强制要求
-        对于每个检测到的图表，你必须创建一个独立的section，包含：
+        
+        #### 2.1 图表分组原则
+        
+        **优先规则1：子图自动分组**
+        - **相同主图的子图必须合并**：如果检测到 Fig 1a, Fig 1b, Fig 1c，必须合并为一个section
+        - **标题示例**：`"3.1.1 Fig 1a-c: 实验范式的三个条件"`
+        - **适用于**：Fig Xa, Xb...; Figure S1a, S1b...; Table 1a, 1b... 等所有带子编号的图表
+        
+        **优先规则2：相关公式分组**
+        - **1-3个相关公式可以合并**：如 Equation 1-3（如果它们是同一推导过程的连续步骤）
+        - **标题示例**：`"3.2.1 Equation 1-3: logLR计算步骤"`
+        
+        **一般规则3：主题相关图表可选分组**
+        - **1-3个不同主图可选合并**：如果主题紧密相关（如 Fig 2, Fig 3, Fig 4 都是行为数据）
+        - **标题示例**：`"4.1.1 Fig 2-4: 行为表现指标组"`
+        - **分组criteria**: 相同主题、相同部分、或紧密相关的图表
+        
+        **层级位置**: 所有图表section都应作为对应部分的子section（如Methods下的3.1.1, Results下的4.1.1）
+        
+        #### 2.2 每个图表section必须包含：
         - **type**: 设置为 "figure" (图表) 或 "equation" (公式)
         - **target_pages**: 该图表所在的页码
-        - **section_title**: 明确包含图表编号（如"Fig 1", "Table 2", "Eq. 3"）
+        - **section_title**: 明确包含图表编号（如"Fig 1", "Fig 1-3", "Table S1", "Eq. 1-2"）
         
-        ### ⚠️ 图表/公式section的优先问题设计
-        **关键要求**：对于 type="figure" 或 "equation" 的section，`sub_questions`数组的**第一个问题必须**回答：
+        ### ⚠️ 图表/公式section的优先问题设计（强制要求）
+        **关键要求**：对于 type="figure" 或 "equation" 的section，`sub_questions`数组必须包含以下**两个独立问题**，且必须在**最前面**：
         
-        1. **这是什么**（内容描述）
-        2. **原理是什么**（工作机制/计算逻辑）
+        **问题1 - 是什么（必须在第1位）**：
+        - **question_type**: "what"
+        - **内容**：描述图表/公式的内容、元素、符号含义
+        - **字数要求**：600-2000字（验证标准500-3000字）
         
-        这个优先问题应该：
-        - 放在 `sub_questions` 数组的**第一位**
-        - question_type 设为 "phenomenon"
-        - 问题内容同时涵盖"是什么"和"原理"两个方面
+        **问题2 - 原理（必须在第2位）**：
+        - **question_type**: "principle"
+        - **内容**：解释工作原理、推导逻辑、理论基础
+        - **字数要求**：600-2500字（验证标准500-3500字）
         
-        然后再添加其他维度的子问题（mechanism, critique等）。
+        **然后才是其他维度的子问题**（mechanism, critique等）。
+        
+        **!!!重要!!!**: 这两个问题必须是**独立分开的**，不能合并成一个问题！
         
         **示例**：
         ```json
@@ -791,8 +861,12 @@ class ArchitectAgent:
             "type": "figure",
             "sub_questions": [
                 {{
-                    "question": "【优先】Fig 1展示了什么内容？图中各个元素（形状、目标、时序）代表什么含义？这个任务的工作原理/流程是怎样的？",
-                    "question_type": "phenomenon"
+                    "question": "Fig 1展示了什么内容？图中各个元素（坐标轴、曲线、数据点、标注、颜色编码等）分别代表什么含义？",
+                    "question_type": "what"
+                }},
+                {{
+                    "question": "Fig 1的工作原理/流程是怎样的？图中展示的机制、过程、或关系是如何运作的？",
+                    "question_type": "principle"
                 }},
                 {{
                     "question": "该任务设计如何确保被试必须进行概率整合而非简单记忆？",
@@ -815,12 +889,12 @@ class ArchitectAgent:
             "type": "equation",
             "sub_questions": [
                 {{
-                    "question": "【优先】Equation 1的数学表达式是什么？各个符号代表什么含义？这个公式的计算原理和推导逻辑是怎样的？",
-                    "question_type": "phenomenon"
+                    "question": "Equation 1的完整数学表达式是什么？各个符号、变量、参数分别代表什么含义？",
+                    "question_type": "what"
                 }},
                 {{
-                    "question": "为什么使用logLR而非概率值？这个转换的贝叶斯理论基础是什么？",
-                    "question_type": "mechanism"
+                    "question": "Equation 1的推导逻辑和计算原理是怎样的？这个公式的理论基础是什么？如何从基本假设推导出来？",
+                    "question_type": "principle"
                 }},
                 {{
                     "question": "这个公式在实际计算中有哪些假设？是否有简化或近似？",
@@ -838,11 +912,14 @@ class ArchitectAgent:
 
         ### 4. 覆盖完整性自检清单
         在输出最终JSON之前，请自问：
-        - [ ] 图表清单中的每个图/表是否都有对应的section？
-        - [ ] 每个编号公式（如果有）是否都被分析？
+        - [ ] 图表清单中的每个图/表是否都有对应的section（包括Supplementary Figures）？
+        - [ ] 每个编号公式（如果有）是否都被分析（包括附录中的公式）？
         - [ ] **每个figure/equation类型的section的第一个问题是否回答了"是什么+原理"？**
         - [ ] IMRAD四大部分是否都有覆盖？
-        - [ ] 每个section的sub_questions是否包含2-4个不同类型的问题？
+        - [ ] 如果论文有附录/补充材料，是否为其创建了分析section？
+        - [ ] 相关图表是否合理分组（1-3个为一组）作为对应部分的子section？
+        - [ ] **每个figure/equation的sub_questions中，前两个问题是否分别是'what'和'principle'类型？**
+        - [ ] 每个section的sub_questions是否包含至少4个问题（what + principle + 其他2个）？
 
         **禁止泛泛而谈**：
         *   **❌ 差**：["分析图2", "讲讲实验结果", "说说这个公式"]
