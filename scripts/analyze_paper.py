@@ -556,12 +556,22 @@ class ArchitectAgent:
         你是一位学术架构师。你的目标是模拟一位"好奇且严谨的研究生"，通读论文摘要和目录后，构建一个**有层级、有标号**的深度研读提纲。
 
         ## 核心指令
-        1. {appendix_instruction}
-        2. **结构自检**: 你的大纲必须完整覆盖学术论文的核心结构 (IMRAD: Introduction, Methods, Results, Discussion)。如果不包含这些，是不合格的。
-        3. **环节细化**: 每个一级环节（如Methods）必须包含至少2个二级子环节。例如：
-           - 3. Methods → 3.1 被试招募 + 3.2 刺激设计 + 3.3 记录方法 + 3.4 数据分析
+
+        ### ⚠️ 第一优先级：完整覆盖所有视觉元素
+        **强制要求**：在设计任何问题之前，你必须：
+        1. **图表清单核查**：检查下方提供的图表清单，每一个图、表、公式都必须在你的大纲中有对应的section
+        2. **逐一对应**：为每个图表创建专门的分析section（如"3.1.1 Fig 1 任务范式"，"3.1.2 Fig 2 神经响应"）
+        3. **公式追踪**：如果论文中出现编号公式（Equation 1, 2...），必须为每个公式创建分析section
 
         {figures_text}
+
+        ### 第二优先级：IMRAD结构完整性
+        1. {appendix_instruction}
+        2. **结构自检**: 你的大纲必须完整覆盖学术论文的核心结构 (IMRAD: Introduction, Methods, Results, Discussion)。
+        3. **环节细化**: 每个一级环节（如Methods）必须包含至少2个二级子环节。
+
+        ### 第三优先级：多维度深度提问
+        在确保覆盖完整性后，对每个section生成2-4个不同维度的子问题。
 
         请输出符合以下 JSON Schema 的对象：
         {{
@@ -584,7 +594,7 @@ class ArchitectAgent:
             ]
         }}
 
-        ## 核心策略：层级化与多维追问
+        ## 详细策略
 
         ### 1. 标号规范 (Hierarchy)
         请在 `section_title` 中严格使用标号，例如：
@@ -593,44 +603,57 @@ class ArchitectAgent:
         - `2.1 核心假设与理论分歧`
         - `3. 实验设计 (Methods)`
         - `3.1 关键变量与 Visual Stimuli`
-        - `3.1.1 Fig 1 任务范式图解`
+        - `3.1.1 Fig 1 任务范式图解` ← **每个图表必须有这样的section！**
+        - `3.1.2 Equation 1: logLR计算公式` ← **每个编号公式必须有section！**
 
-        ### 2. 多维子问题生成 (Multi-Dimensional Sub-questions with Types)
-        **重要**：每个section的`sub_questions`字段必须包含**2-4个不同类型的子问题**：
-
-        **三种问题类型**：
-        - **phenomenon** (现象描述/"是什么"): 描述观察到的现象、数据趋势、图表内容
-        - **mechanism** (机理推导): 探究背后的数学/神经/计算机制，要求推导或解释原理
-        - **critique** (目的和批判/"为什么"): 质疑设计动机、识别局限性、提出改进建议
-
-        **范例**：对于\"3.1 Fig 2 神经元放电模式\"，生成如下子问题：
+        ### 2. 图表分析section的强制要求
+        对于每个检测到的图表，你必须创建一个独立的section，包含：
+        - **type**: 设置为 "figure" (图表) 或 "equation" (公式)
+        - **target_pages**: 该图表所在的页码
+        - **section_title**: 明确包含图表编号（如"Fig 1", "Table 2", "Eq. 3"）
+        
+        **示例**：
         ```json
-        "sub_questions": [
-            {{
-                "question": "图2显示了LIP神经元的放电率变化。这个数据呈现了什么趋势？在delay阶段的持续性放电说明了什么？",
-                "question_type": "phenomenon"
-            }},
-            {{
-                "question": "从计算角度看，这种爬坡活动（ramping activity）的数学本质是什么？是否可以用漂移扩散模型（DDM）的随机微分方程来描述？请给出推导。",
-                "question_type": "mechanism"
-            }},
-            {{
-                "question": "大脑为什么要采用这种积分机制？与直接响应刺激相比，证据累积策略在贝叶斯最优决策中的优势是什么？这个设计有哪些潜在局限？",
-                "question_type": "critique"
-            }}
-        ]
+        {{
+            "section_title": "3.1.1 Fig 1: 任务范式示意图",
+            "target_pages": [2],
+            "filename_slug": "fig1_paradigm",
+            "type": "figure",
+            "sub_questions": [
+                {{
+                    "question": "Fig 1展示了怎样的实验流程？各阶段的时序关系如何？",
+                    "question_type": "phenomenon"
+                }},
+                {{
+                    "question": "该任务设计如何确保被试必须进行概率整合而非简单记忆？",
+                    "question_type": "mechanism"
+                }},
+                {{
+                    "question": "如果改变形状呈现顺序，实验结果会如何变化？",
+                    "question_type": "critique"
+                }}
+            ]
+        }}
         ```
 
-        ### 3. 问题视角自检（避免不必要重复）
-        - ✅ **允许**: 同一对象从不同类型角度分析（如Fig1的phenomenon → mechanism → critique）
-        - ❌ **禁止**: 同一类型下的重复提问（如两个phenomenon问题问同样的内容）
-        - **检查清单**: 每生成一个问题，问自己："这个问题与之前的问题相比，是否提供了新的探究视角或不同的分析维度？"
+        ### 3. 多维子问题生成 (针对每个section)
+        **三种问题类型**：
+        - **phenomenon** (现象描述/"是什么"): 描述图表内容、数据趋势、观察结果
+        - **mechanism** (机理推导): 探究背后的数学推导、计算原理、神经机制
+        - **critique** (批判与改进/"为什么"): 质疑设计、识别局限、提出改进
+
+        ### 4. 覆盖完整性自检清单
+        在输出最终JSON之前，请自问：
+        - [ ] 图表清单中的每个图/表是否都有对应的section？
+        - [ ] 每个编号公式（如果有）是否都被分析？
+        - [ ] IMRAD四大部分是否都有覆盖？
+        - [ ] 每个section的sub_questions是否包含2-4个不同类型的问题？
 
         **禁止泛泛而谈**：
         *   **❌ 差**：["分析图2", "讲讲实验结果", "说说这个公式"]
         *   **✅ 优**：具体、原理向、有上下文的深度提问（见上述范例）
         
-        请确保生成的"学习地图"逻辑严密，像一份高质量的**研读笔记目录**。
+        请确保生成的"学习地图"逻辑严密，像一份高质量的**研读笔记目录**，且不遗漏任何关键视觉元素。
         """
         
         response = call_api_with_retry(
