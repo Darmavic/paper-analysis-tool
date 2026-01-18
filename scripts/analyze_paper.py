@@ -477,7 +477,60 @@ def deduplicate_sections(sections: List[SectionIntent], figures_list: List[dict]
             return len(new.sub_questions) > len(existing.sub_questions)
         return False
     
-    # 去重逻辑（优先保留图表类型）
+    def is_priority_question(question: str) -> bool:
+        """判断是否是优先问题（是什么+原理）"""
+        keywords = ['是什么', '展示了什么', '代表什么', '什么内容', '工作原理', '计算原理', '推导逻辑', '数学表达式']
+        question_lower = question.lower()
+        # 至少包含一个"是什么"类关键词和一个"原理"类关键词，或者标记了【优先】
+        has_what = any(k in question for k in ['是什么', '展示了什么', '代表什么', '什么内容', '什么含义'])
+        has_why = any(k in question for k in ['原理', '逻辑', '机制', '流程'])
+        return '【优先】' in question or (has_what and has_why)
+    
+    def merge_sub_questions(existing: SectionIntent, new: SectionIntent) -> SectionIntent:
+        """合并两个section的sub_questions，保护优先问题"""
+        from difflib import SequenceMatcher
+        
+        # 收集所有sub_questions
+        all_questions = []
+        priority_questions = []
+        
+        # 从existing中提取
+        for sq in existing.sub_questions:
+            if is_priority_question(sq.question):
+                priority_questions.append(sq)
+            else:
+                all_questions.append(sq)
+        
+        # 从new中提取并去重
+        for sq in new.sub_questions:
+            if is_priority_question(sq.question):
+                # 优先问题：检查是否已有，没有则添加
+                is_dup = False
+                for pq in priority_questions:
+                    if SequenceMatcher(None, sq.question, pq.question).ratio() > 0.8:
+                        is_dup = True
+                        break
+                if not is_dup:
+                    priority_questions.append(sq)
+            else:
+                # 非优先问题：与all_questions去重
+                is_dup = False
+                for aq in all_questions:
+                    if SequenceMatcher(None, sq.question, aq.question).ratio() > 0.7:
+                        is_dup = True
+                        break
+                if not is_dup:
+                    all_questions.append(sq)
+        
+        # 合并：优先问题在前
+        merged_questions = priority_questions + all_questions
+        
+        # 返回合并后的section（使用优先级更高的那个作为基础）
+        base = existing if should_keep_new(existing, new) == False else new
+        base.sub_questions = merged_questions
+        return base
+    
+    # 去重逻辑（优先保留图表类型，并智能合并sub_questions）
     unique_sections = []
     section_map = {}  # title -> (index, section)
     
@@ -490,10 +543,11 @@ def deduplicate_sections(sections: List[SectionIntent], figures_list: List[dict]
             if are_similar(section.section_title, key):
                 found_similar = True
                 similar_key = key
-                # 判断是否应该替换
-                if should_keep_new(existing, section):
-                    unique_sections[idx] = section
-                    section_map[similar_key] = (idx, section)
+                # 合并sub_questions而不是简单替换
+                merged_section = merge_sub_questions(existing, section)
+                unique_sections[idx] = merged_section
+                section_map[similar_key] = (idx, merged_section)
+                print(f"  🔄 合并: '{existing.section_title}' (保留优先问题，去重其他问题)")
                 break
         
         if not found_similar:
@@ -661,6 +715,19 @@ class ArchitectAgent:
         - **target_pages**: 该图表所在的页码
         - **section_title**: 明确包含图表编号（如"Fig 1", "Table 2", "Eq. 3"）
         
+        ### ⚠️ 图表/公式section的优先问题设计
+        **关键要求**：对于 type="figure" 或 "equation" 的section，`sub_questions`数组的**第一个问题必须**回答：
+        
+        1. **这是什么**（内容描述）
+        2. **原理是什么**（工作机制/计算逻辑）
+        
+        这个优先问题应该：
+        - 放在 `sub_questions` 数组的**第一位**
+        - question_type 设为 "phenomenon"
+        - 问题内容同时涵盖"是什么"和"原理"两个方面
+        
+        然后再添加其他维度的子问题（mechanism, critique等）。
+        
         **示例**：
         ```json
         {{
@@ -670,7 +737,7 @@ class ArchitectAgent:
             "type": "figure",
             "sub_questions": [
                 {{
-                    "question": "Fig 1展示了怎样的实验流程？各阶段的时序关系如何？",
+                    "question": "【优先】Fig 1展示了什么内容？图中各个元素（形状、目标、时序）代表什么含义？这个任务的工作原理/流程是怎样的？",
                     "question_type": "phenomenon"
                 }},
                 {{
@@ -679,6 +746,30 @@ class ArchitectAgent:
                 }},
                 {{
                     "question": "如果改变形状呈现顺序，实验结果会如何变化？",
+                    "question_type": "critique"
+                }}
+            ]
+        }}
+        ```
+        
+        **公式示例**：
+        ```json
+        {{
+            "section_title": "3.2.1 Equation 1: logLR计算公式",
+            "target_pages": [4],
+            "filename_slug": "eq1_loglr",
+            "type": "equation",
+            "sub_questions": [
+                {{
+                    "question": "【优先】Equation 1的数学表达式是什么？各个符号代表什么含义？这个公式的计算原理和推导逻辑是怎样的？",
+                    "question_type": "phenomenon"
+                }},
+                {{
+                    "question": "为什么使用logLR而非概率值？这个转换的贝叶斯理论基础是什么？",
+                    "question_type": "mechanism"
+                }},
+                {{
+                    "question": "这个公式在实际计算中有哪些假设？是否有简化或近似？",
                     "question_type": "critique"
                 }}
             ]
@@ -695,6 +786,7 @@ class ArchitectAgent:
         在输出最终JSON之前，请自问：
         - [ ] 图表清单中的每个图/表是否都有对应的section？
         - [ ] 每个编号公式（如果有）是否都被分析？
+        - [ ] **每个figure/equation类型的section的第一个问题是否回答了"是什么+原理"？**
         - [ ] IMRAD四大部分是否都有覆盖？
         - [ ] 每个section的sub_questions是否包含2-4个不同类型的问题？
 
