@@ -404,7 +404,7 @@ def sanitize_obsidian_filename(name: str) -> str:
         clean_name = clean_name.replace(char, "_")
     return clean_name.strip()
 
-def deduplicate_sections(sections: List[SectionIntent]) -> List[SectionIntent]:
+def deduplicate_sections(sections: List[SectionIntent], figures_list: List[dict] = None) -> List[SectionIntent]:
     """
     去除重复的section分析。判断重复的标准：
     1. 相同的图表编号（如Fig. 1, Table 2）
@@ -461,25 +461,74 @@ def deduplicate_sections(sections: List[SectionIntent]) -> List[SectionIntent]:
         ratio = SequenceMatcher(None, title1.lower(), title2.lower()).ratio()
         return ratio > threshold
     
-    # 去重逻辑
+    
+    def should_keep_new(existing: SectionIntent, new: SectionIntent) -> bool:
+        """判断是否应该用新section替换已存在的section"""
+        # 优先级: figure/equation > text
+        priority_map = {'figure': 2, 'equation': 2, 'text': 1}
+        existing_priority = priority_map.get(existing.type, 0)
+        new_priority = priority_map.get(new.type, 0)
+        
+        # 如果新的优先级更高，替换
+        if new_priority > existing_priority:
+            return True
+        # 如果优先级相同，看子问题数量（保留更详细的）
+        elif new_priority == existing_priority:
+            return len(new.sub_questions) > len(existing.sub_questions)
+        return False
+    
+    # 去重逻辑（优先保留图表类型）
     unique_sections = []
-    seen_titles = []
+    section_map = {}  # title -> (index, section)
     
     for section in sections:
-        is_duplicate = False
-        for seen_title in seen_titles:
-            if are_similar(section.section_title, seen_title):
-                is_duplicate = True
+        found_similar = False
+        similar_key = None
+        
+        # 查找是否有相似的section
+        for key, (idx, existing) in section_map.items():
+            if are_similar(section.section_title, key):
+                found_similar = True
+                similar_key = key
+                # 判断是否应该替换
+                if should_keep_new(existing, section):
+                    unique_sections[idx] = section
+                    section_map[similar_key] = (idx, section)
                 break
         
-        if not is_duplicate:
+        if not found_similar:
+            idx = len(unique_sections)
             unique_sections.append(section)
-            seen_titles.append(section.section_title)
+            section_map[section.section_title] = (idx, section)
     
     # 打印去重结果
     removed_count = len(sections) - len(unique_sections)
     if removed_count > 0:
         print(f"🔧 去重完成: 移除了{removed_count}个重复section，保留{len(unique_sections)}个唯一section")
+    
+    # 验证图表覆盖完整性
+    if figures_list:
+        figure_sections = [s for s in unique_sections if s.type in ['figure', 'equation']]
+        print(f"📊 图表覆盖验证: 检测到{len(figures_list)}个图表，生成了{len(figure_sections)}个图表分析section")
+        
+        # 提取所有图表编号
+        detected_figs = set()
+        for fig in figures_list:
+            fig_num = extract_figure_number(fig.get('caption', ''))
+            if fig_num:
+                detected_figs.add(fig_num)
+        
+        analyzed_figs = set()
+        for section in figure_sections:
+            fig_num = extract_figure_number(section.section_title)
+            if fig_num:
+                analyzed_figs.add(fig_num)
+        
+        missing = detected_figs - analyzed_figs
+        if missing:
+            print(f"⚠️  警告: 以下图表可能未被分析: {', '.join(sorted(missing))}")
+        else:
+            print(f"✅ 所有检测到的图表都有对应分析section")
     
     return unique_sections
 
@@ -1020,7 +1069,7 @@ def main():
         print(f"\n✅ 所有批次完成！共生成{len(all_sections)}个分析问题")
         
         # 去重处理
-        unique_sections = deduplicate_sections(all_sections)
+        unique_sections = deduplicate_sections(all_sections, figures_list)
         
         # 创建完整的Outline
         outline = Outline(
