@@ -484,6 +484,7 @@ def deduplicate_sections(sections: List[SectionIntent]) -> List[SectionIntent]:
     return unique_sections
 
 def call_api_with_retry(client, model, messages, response_format=None, max_retries=15):
+    import json
     retries = 0
     base_delay = 2
     
@@ -497,6 +498,16 @@ def call_api_with_retry(client, model, messages, response_format=None, max_retri
                 messages=messages,
                 response_format=response_format
             )
+        except json.JSONDecodeError as e:
+            # Special handling for JSON parsing errors (often means API returned HTML error page)
+            wait_time = base_delay * (2 ** retries)
+            print(f"⚠️  JSON解析错误 (API可能返回了非JSON响应). 等待 {wait_time} 秒后重试... (尝试 {retries+1}/{max_retries})")
+            print(f"   错误详情: {str(e)[:200]}")
+            time.sleep(wait_time)
+            retries += 1
+            if retries >= max_retries:
+                print(f"❌ JSON解析错误持续出现，已达到重试上限。跳过此问题。")
+                return None  # Return None to allow skipping
         except Exception as e:
             error_str = str(e).lower()
             if "429" in error_str or "rate limit" in error_str or "quota" in error_str:
@@ -783,6 +794,12 @@ class AnalystAgent:
                 model=ANALYST_MODEL,
                 messages=messages
             )
+            
+            # Handle case where API call failed after max retries
+            if response is None:
+                print(f"⚠️  API调用失败，跳过此问题")
+                return f"# {sub_question.question}\n\n**[分析跳过：API调用失败]**\n\n该问题因API错误被跳过，请稍后手动补充分析。"
+            
             content = response.choices[0].message.content
             
             # Word count validation (Chinese characters)
