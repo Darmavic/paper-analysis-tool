@@ -586,6 +586,60 @@ def deduplicate_sections(sections: List[SectionIntent], figures_list: List[dict]
     
     return unique_sections
 
+def validate_and_fix_priority_questions(outline: Outline, figures_list: List[dict] = None) -> Outline:
+    """
+    验证并修复outline中的优先问题
+    确保所有figure/equation类型的section都有"是什么+原理"问题
+    """
+    fixed_count = 0
+    
+    def has_priority_question(sub_questions: List[SubQuestion]) -> bool:
+        """检查是否有优先问题"""
+        if not sub_questions:
+            return False
+        
+        first_q = sub_questions[0].question
+        has_what = any(k in first_q for k in ['是什么', '展示了什么', '代表什么', '什么内容', '什么含义'])
+        has_why = any(k in first_q for k in ['原理', '逻辑', '机制', '流程'])
+        
+        return '【优先】' in first_q or (has_what and has_why)
+    
+    def create_priority_question(section: SectionIntent) -> SubQuestion:
+        """为section创建优先问题"""
+        title = section.section_title
+        
+        if section.type == 'figure':
+            question = f"【优先】{title}展示了什么内容？图中各个元素代表什么含义？其工作原理/流程是怎样的？"
+        elif section.type == 'equation':
+            question = f"【优先】{title}的数学表达式是什么？各个符号代表什么含义？这个公式的计算原理和推导逻辑是怎样的？"
+        else:
+            return None
+        
+        return SubQuestion(
+            question=question,
+            question_type="phenomenon",
+            min_words=1000,
+            max_words=3000
+        )
+    
+    # 验证并修复每个section
+    for section in outline.sections:
+        if section.type in ['figure', 'equation']:
+            if not has_priority_question(section.sub_questions):
+                # 创建并插入优先问题到第一位
+                priority_q = create_priority_question(section)
+                if priority_q:
+                    section.sub_questions.insert(0, priority_q)
+                    fixed_count += 1
+                    print(f"  🔧 自动补充优先问题: {section.section_title}")
+    
+    if fixed_count > 0:
+        print(f"✅ 优先问题验证完成: 自动补充了{fixed_count}个遗漏的优先问题")
+    else:
+        print(f"✅ 优先问题验证通过: 所有figure/equation section都包含优先问题")
+    
+    return outline
+
 def call_api_with_retry(client, model, messages, response_format=None, max_retries=15):
     import json
     retries = 0
@@ -1163,12 +1217,15 @@ def main():
         # 去重处理
         unique_sections = deduplicate_sections(all_sections, figures_list)
         
-        # 创建完整的Outline
-        outline = Outline(
-            paper_title=batch_outline.paper_title,  # 使用最后一批的标题（实际应该都一样）
+        # 创建临时Outline for validation
+        temp_outline = Outline(
+            paper_title=batch_outline.paper_title,
             summary=batch_outline.summary,
             sections=unique_sections
         )
+        
+        # 验证并补充优先问题
+        outline = validate_and_fix_priority_questions(temp_outline, figures_list)
         
         # Soft Structure Check
         titles = [s.section_title.lower() for s in outline.sections]
