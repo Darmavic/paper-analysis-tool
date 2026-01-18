@@ -1,0 +1,34 @@
+# Git 上传命令（复制并执行）
+
+## 步骤1：初始化Git仓库
+
+# 打开PowerShell，导航到项目目录
+cd "c:\Users\55459\Desktop\研究生组会\Decision making\lunwen"
+
+# 初始化Git
+git init
+
+# 添加所有文件
+git add .
+
+# 创建首次提交
+git commit -m "Initial commit: Academic paper analysis tool with Marker OCR"
+
+## 步骤2：连接GitHub并推送
+
+# 添加远程仓库（您的用户名：Darmavic）
+git remote add origin https://github.com/Darmavic/paper-analysis-tool.git
+
+# 推送代码
+git branch -M main
+git push -u origin main
+
+## 如果提示需要认证：
+# 1. 访问 https://github.com/settings/tokens
+# 2. 点击 "Generate new token (classic)"
+# 3. 勾选 "repo" 权限
+# 4. 复制生成的token
+# 5. 在git push时，用户名填 Darmavic，密码填token
+
+## ✅ 完成后访问：
+# https://github.com/Darmavic/paper-analysis-tool

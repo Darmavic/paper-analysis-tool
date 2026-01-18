@@ -1,0 +1,6 @@
+openai>=1.0.0
+pymupdf
+openai
+pydantic
+python-dotenv
+mineru[all]  # For future integration

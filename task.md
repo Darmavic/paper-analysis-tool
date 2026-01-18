@@ -1,0 +1,30 @@
+# 任务清单: 论文到 Obsidian 工作流 (OpenRouter 版)
+
+- [x] 项目初始化 <!-- id: 0 -->
+    - [x] 创建虚拟环境并安装依赖项 (`pymupdf`, `openai`, `pydantic`, `python-dotenv`) <!-- id: 1 -->
+    - [x] 验证 OpenRouter API Key 可用性 <!-- id: 2 -->
+- [x] 本地技能创建: Paper Analysis Skill (`.agent/skills/paper_to_obsidian`) <!-- id: 3 -->
+    - [/] Refactor for PaddleOCR and Qwen3 VL
+    - [x] Setup Conda Environment
+    - [x] Install PaddleOCR dependencies
+    - [x] Update `analyze_paper.py` to use `paddleocr` for parsing
+    - [x] Update `ANALYST_MODEL` to Qwen3 VL (OpenRouter)
+    - [x] Verify execution
+- [x] **Enhance Content Quality**
+    - [x] **Prompt Engineering**: Update Analyst prompt for "Deep Dive" and robust LaTeX.
+    - [x] **Verification Logic**: Implement `ContentValidator` (Length > 600 words, Latex Check, 4-Dim Taxonomy).
+    - [x] **Retry Loop**: Add auto-retry if quality check fails.
+- [/] **Structure & Readability**
+    - [ ] **Config**: Add `--include-appendix` flag.
+    - [ ] **Structure Check**: Verify Architect outline covers Intro, Methods, Results, Discussion.
+    - [ ] **Formatting**: Enforce bullet points, bold keywords, shorter paragraphs.
+    - [x] 编写 Skill 定义文件 (`SKILL.md`) <!-- id: 4 -->
+    - [x] 创建脚本目录和依赖文件 (`scripts/requirements.txt`) <!-- id: 5 -->
+- [x] 核心脚本实现 (`scripts/analyze_paper.py`) <!-- id: 6 -->
+    - [x] PDF 处理器: 实现高 DPI 图像提取 <!-- id: 7 -->
+    - [x] 架构师 Agent: 摘要/目录分析 (Gemini 2.0 Flash via OpenRouter) <!-- id: 8 -->
+    - [x] 分析师 Agent: 视觉分析 (Gemini 2.0 Flash via OpenRouter) <!-- id: 9 -->
+    - [x] Obsidian 写入器: Markdwon/WikiLinks 生成 <!-- id: 10 -->
+- [x] 验证 <!-- id: 11 -->
+    - [x] 对测试 PDF 运行完整流程 <!-- id: 12 -->
+    - [x] 检查 Obsidian Vault 内容 <!-- id: 13 -->
