@@ -5,6 +5,7 @@ import argparse
 import base64
 import json
 import re
+import time
 from typing import List, Optional, Any
 from pathlib import Path
 from openai import OpenAI
