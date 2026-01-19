@@ -1,6 +1,5 @@
-openai>=1.0.0
-pymupdf
-openai
-pydantic
-python-dotenv
-mineru[all]  # For future integration
+openai==1.109.1
+pymupdf==1.26.7
+pydantic==2.12.5
+python-dotenv==1.2.1
+marker-pdf  # Marker for PDF processing with formula recognition
