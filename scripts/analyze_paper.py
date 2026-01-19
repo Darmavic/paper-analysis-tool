@@ -43,7 +43,7 @@ USE_MARKER = True  # 启用Marker模式进行测试
 
 # Architect分批处理配置
 # Marker会逐页识别整个PDF，然后Architect每N页分批提取问题
-PAGES_PER_BATCH = 5  # 每批处理的页数，建议2-5页
+PAGES_PER_BATCH = 22  # 每批处理的页数，建议2-5页
 
 # --- PDF Extraction Strategy ---
 # Using PyMuPDF (fitz) for text extraction
@@ -397,10 +397,278 @@ class FigureScanner:
         self.doc.close()
 
 
+class EquationScanner:
+    """扫描Marker输出中的所有公式（编号和未编号）"""
+    
+    def __init__(self, all_pages_text: List[str]):
+        """
+        Args:
+            all_pages_text: Marker转换后的所有页面文本列表
+        """
+        self.all_pages_text = all_pages_text
+    
+    def scan_all_equations(self) -> List[dict]:
+        """
+        扫描所有页面识别公式
+        返回格式: [
+            {
+                "page": int,              # 0-indexed页码
+                "equation_type": str,     # "numbered" | "unnumbered"
+                "equation_number": str,   # 如 "1", "2", "1a" (编号公式) 或 None
+                "equation_text": str,     # LaTeX公式文本 (去除$$符号)
+                "context": str,           # 公式上下文 (前后各50字)
+                "description": str        # 描述性标题 (根据上下文生成)
+            },
+            ...
+        ]
+        """
+        equations = []
+        
+        for page_num, page_text in enumerate(self.all_pages_text):
+            # 1. 识别编号公式
+            numbered_eqs = self._extract_numbered_equations(page_text, page_num)
+            equations.extend(numbered_eqs)
+            
+            # 2. 识别重要的未编号显示公式
+            unnumbered_eqs = self._extract_unnumbered_equations(
+                page_text, page_num, numbered_eqs
+            )
+            equations.extend(unnumbered_eqs)
+        
+        return equations
+    
+    def _extract_numbered_equations(self, text: str, page_num: int) -> List[dict]:
+        """
+        提取编号公式
+        识别模式:
+        1. 独立编号: (1), (2), (1a) 等，必须与$$...$$在±10行内
+        2. 显式引用: Equation 1, Eq. 2, 式(3) 等
+        """
+        numbered_equations = []
+        
+        # 模式1: 查找所有$$...$$显示公式
+        display_eq_pattern = r'\$\$(.*?)\$\$'
+        display_eqs = list(re.finditer(display_eq_pattern, text, re.DOTALL))
+        
+        # 模式2: 查找所有可能的编号
+        # (1), (2), (1a), (A.1) 等模式
+        number_pattern = r'\((\d+[a-z]?|[A-Z]\.\d+)\)'
+        
+        # 模式3: 显式引用 "Equation 1", "Eq. 2", "式(1)"
+        ref_patterns = [
+            r'(?:Equation|Eq\.?)\s+(\d+[a-z]?)',
+            r'(?:式|公式)\s*\(?(\d+[a-z]?)\)?'
+        ]
+        
+        # 为每个显示公式尝试匹配编号
+        for eq_match in display_eqs:
+            eq_text = eq_match.group(1).strip()
+            eq_start = eq_match.start()
+            eq_end = eq_match.end()
+            
+            # 提取上下文（前后各150字符）
+            context_start = max(0, eq_start - 150)
+            context_end = min(len(text), eq_end + 150)
+            context = text[context_start:context_end]
+            
+            # 在上下文中查找编号
+            equation_number = None
+            
+            # 方法1: 查找独立编号 (1), (2) 等
+            # 在公式前后20行范围内搜索
+            lines_before = text[max(0, eq_start-500):eq_start].split('\n')
+            lines_after = text[eq_end:min(len(text), eq_end+500)].split('\n')
+            
+            # 优先在公式后面查找（通常编号在右侧）
+            for line in lines_after[:3]:  # 只看后面3行
+                number_match = re.search(number_pattern, line)
+                if number_match:
+                    equation_number = number_match.group(1)
+                    break
+            
+            # 如果后面没找到，看前面
+            if not equation_number:
+                for line in reversed(lines_before[-3:]):  # 只看前面3行
+                    number_match = re.search(number_pattern, line)
+                    if number_match:
+                        equation_number = number_match.group(1)
+                        break
+            
+            # 方法2: 查找显式引用
+            if not equation_number:
+                for ref_pattern in ref_patterns:
+                    ref_match = re.search(ref_pattern, context, re.IGNORECASE)
+                    if ref_match:
+                        equation_number = ref_match.group(1)
+                        break
+            
+            # 如果找到编号，记录为编号公式
+            if equation_number:
+                # 生成描述（基于上下文）
+                description = self._generate_description(context, equation_number, is_numbered=True)
+                
+                numbered_equations.append({
+                    "page": page_num,
+                    "equation_type": "numbered",
+                    "equation_number": equation_number,
+                    "equation_text": eq_text,
+                    "context": context,
+                    "description": description
+                })
+        
+        return numbered_equations
+    
+    def _extract_unnumbered_equations(
+        self, text: str, page_num: int, 
+        numbered_equations: List[dict]
+    ) -> List[dict]:
+        """
+        提取未编号但重要的显示公式
+        排除:
+        1. 已识别为编号公式的部分
+        2. 过于简单的公式（如 x = 1）
+        """
+        unnumbered_equations = []
+        
+        # 提取所有已识别编号公式的文本（用于排除）
+        numbered_texts = set(eq['equation_text'] for eq in numbered_equations)
+        
+        # 查找所有$$...$$显示公式
+        display_eq_pattern = r'\$\$(.*?)\$\$'
+        display_eqs = list(re.finditer(display_eq_pattern, text, re.DOTALL))
+        
+        for eq_match in display_eqs:
+            eq_text = eq_match.group(1).strip()
+            
+            # 跳过已识别为编号公式的
+            if eq_text in numbered_texts:
+                continue
+            
+            # 判断重要性
+            if not self._is_important_equation(eq_text):
+                continue
+            
+            # 提取上下文
+            eq_start = eq_match.start()
+            eq_end = eq_match.end()
+            context_start = max(0, eq_start - 150)
+            context_end = min(len(text), eq_end + 150)
+            context = text[context_start:context_end]
+            
+            # 生成描述性标题
+            description = self._generate_description(context, None, is_numbered=False)
+            
+            unnumbered_equations.append({
+                "page": page_num,
+                "equation_type": "unnumbered",
+                "equation_number": None,
+                "equation_text": eq_text,
+                "context": context,
+                "description": description
+            })
+        
+        return unnumbered_equations
+    
+    def _is_important_equation(self, eq_text: str) -> bool:
+        """
+        判断未编号公式是否重要
+        标准:
+        1. 长度>20字符
+        2. 包含关键符号或函数
+        """
+        # 长度检查
+        if len(eq_text) < 20:
+            return False
+        
+        # 关键符号检查
+        important_symbols = [
+            r'\\sum', r'\\prod', r'\\int',  # 求和、乘积、积分
+            r'\\frac', r'\\partial',        # 分数、偏导
+            r'\\nabla', r'\\Delta',         # 梯度、差分
+            r'\\max', r'\\min', r'\\arg',   # 优化
+            r'\\mathbb', r'\\mathcal',      # 特殊字体（通常表示集合、空间）
+            r'\\alpha', r'\\beta', r'\\theta',  # 希腊字母（参数）
+            r'\\sim', r'\\approx',          # 分布、近似
+            r'\\rightarrow', r'\\leftarrow', # 映射
+            r'\\leq', r'\\geq',             # 不等式
+        ]
+        
+        for symbol in important_symbols:
+            if symbol in eq_text:
+                return True
+        
+        # 检查是否包含下标/上标（通常是重要公式的特征）
+        if '_' in eq_text or '^' in eq_text:
+            # 但要排除单纯的 x_1, y^2 这种简单表达
+            if '=' in eq_text or '+' in eq_text or '-' in eq_text:
+                return True
+        
+        return False
+    
+    def _generate_description(self, context: str, equation_number: Optional[str], is_numbered: bool) -> str:
+        """
+        基于上下文生成描述性标题
+        
+        Args:
+            context: 公式上下文
+            equation_number: 公式编号（如果是编号公式）
+            is_numbered: 是否是编号公式
+        """
+        context_lower = context.lower()
+        
+        # 定义关键词模板
+        keyword_templates = [
+            # (关键词, 标题模板, 优先级)
+            (['loss', '损失', 'cost'], '损失函数', 1),
+            (['update', '更新', 'gradient'], '更新规则', 1),
+            (['bayesian', 'posterior', '贝叶斯', '后验'], '后验概率', 1),
+            (['prior', '先验'], '先验分布', 1),
+            (['likelihood', '似然'], '似然函数', 1),
+            (['objective', 'optimization', '优化', '目标'], '优化目标', 2),
+            (['definition', 'define', '定义'], '定义', 2),
+            (['constraint', '约束'], '约束条件', 2),
+            (['probability', 'prob', '概率'], '概率计算', 3),
+            (['expectation', 'expected', '期望'], '期望值', 3),
+            (['variance', '方差'], '方差计算', 3),
+            (['entropy', '熵'], '熵计算', 3),
+            (['error', '误差'], '误差函数', 3),
+            (['prediction', '预测'], '预测模型', 3),
+            (['estimation', '估计'], '估计量', 3),
+        ]
+        
+        # 匹配关键词
+        matched_template = None
+        best_priority = 999
+        
+        for keywords, template, priority in keyword_templates:
+            for keyword in keywords:
+                if keyword in context_lower:
+                    if priority < best_priority:
+                        matched_template = template
+                        best_priority = priority
+                    break
+        
+        # 生成最终描述
+        if is_numbered and equation_number:
+            # 编号公式
+            base_desc = f"Equation {equation_number}"
+            if matched_template:
+                return f"{base_desc}: {matched_template}"
+            else:
+                return base_desc
+        else:
+            # 未编号公式
+            if matched_template:
+                return matched_template
+            else:
+                # 默认描述
+                return "核心公式"
+
+
 # --- Utilities ---
 
 def sanitize_obsidian_filename(name: str) -> str:
-    """
+    r"""
     Clean filename for Obsidian compatibility:
     1. Replace invalid chars (\ / : * ? " < > |) with '_'
     2. Collapse consecutive underscores
@@ -415,6 +683,247 @@ def sanitize_obsidian_filename(name: str) -> str:
     for char in invalid_chars:
         clean_name = clean_name.replace(char, "_")
     return clean_name.strip()
+
+def group_visual_elements(figures_list: List[dict], equations_list: List[dict]) -> dict:
+    """
+    智能分组视觉元素（图表和公式）
+    
+    分组策略：
+    1. 图表：子图自动分组 (Fig 1a, 1b, 1c)
+    2. 公式：基于关联度分组 (1-4个为一组)
+    
+    Returns:
+        {
+            "figure_groups": [
+                {
+                    "group_type": "subfigures" | "single",
+                    "items": [fig1, fig2, ...],
+                    "group_description": "Fig 1a-c: ..."
+                }
+            ],
+            "equation_groups": [
+                {
+                    "group_type": "related" | "single",
+                    "items": [eq1, eq2, ...],
+                    "group_description": "Equation 1-3: ...",
+                    "similarity_score": 0.8
+                }
+            ]
+        }
+    """
+    import re
+    from difflib import SequenceMatcher
+    
+    def extract_figure_base_and_sub(caption: str) -> tuple:
+        """
+        提取图表的基础编号和子编号
+        Returns: (base_number, sub_letter)
+        例如: "Fig 1a" -> ("1", "a")
+             "Figure 2" -> ("2", None)
+             "Table 3b" -> ("3", "b")
+        """
+        patterns = [
+            r'(?:Fig\.?|Figure)\s*(\d+)([a-z])?',
+            r'(?:Table)\s*(\d+)([a-z])?',
+            r'(?:图)\s*(\d+)([a-z])?',
+            r'(?:表)\s*(\d+)([a-z])?',
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, caption, re.IGNORECASE)
+            if match:
+                base = match.group(1)
+                sub = match.group(2) if len(match.groups()) > 1 else None
+                return (base, sub)
+        
+        return (None, None)
+    
+    # 1. 图表分组
+    figure_groups = []
+    if figures_list:
+        # 按基础编号分组
+        base_groups = {}
+        for fig in figures_list:
+            base, sub = extract_figure_base_and_sub(fig['caption'])
+            if base:
+                key = base
+                if key not in base_groups:
+                    base_groups[key] = []
+                base_groups[key].append((fig, sub))
+        
+        # 生成分组
+        for base, items in base_groups.items():
+            if len(items) > 1 and any(sub for _, sub in items):
+                # 多个子图
+                items_sorted = sorted(items, key=lambda x: x[1] or '')
+                figs = [item[0] for item in items_sorted]
+                subs = [item[1] for item in items_sorted if item[1]]
+                
+                # 生成组描述
+                first_caption = figs[0]['caption']
+                match = re.search(r'(?:Fig\.?|Figure|Table|图|表)\s*\d+', first_caption, re.IGNORECASE)
+                prefix = match.group(0) if match else f"Fig {base}"
+                
+                if subs:
+                    sub_range = f"{subs[0]}-{subs[-1]}" if len(subs) > 1 else subs[0]
+                    group_desc = f"{prefix}{sub_range}"
+                else:
+                    group_desc = prefix
+                
+                figure_groups.append({
+                    "group_type": "subfigures",
+                    "items": figs,
+                    "group_description": group_desc,
+                    "pages": [f['page'] for f in figs]
+                })
+            else:
+                # 单个图表
+                for fig, _ in items:
+                    figure_groups.append({
+                        "group_type": "single",
+                        "items": [fig],
+                        "group_description": fig['caption'],
+                        "pages": [fig['page']]
+                    })
+    
+    # 2. 公式分组
+    def calculate_equation_similarity(eq1: dict, eq2: dict) -> float:
+        """
+        计算两个公式的关联度 (0-1)
+        
+        评分标准：
+        - 页码接近 (+0.2)
+        - 上下文关键词相似 (+0.4)
+        - 描述相似 (+0.2)
+        - 连续编号 (+0.2)
+        """
+        score = 0.0
+        
+        # 1. 页码接近 (同一页或相邻页)
+        page_diff = abs(eq1['page'] - eq2['page'])
+        if page_diff == 0:
+            score += 0.2
+        elif page_diff == 1:
+            score += 0.1
+        
+        # 2. 上下文关键词相似
+        context1 = eq1.get('context', '').lower()
+        context2 = eq2.get('context', '').lower()
+        if context1 and context2:
+            context_similarity = SequenceMatcher(None, context1, context2).ratio()
+            score += context_similarity * 0.4
+        
+        # 3. 描述相似
+        desc1 = eq1.get('description', '').lower()
+        desc2 = eq2.get('description', '').lower()
+        if desc1 and desc2:
+            desc_similarity = SequenceMatcher(None, desc1, desc2).ratio()
+            score += desc_similarity * 0.2
+        
+        # 4. 连续编号 (仅对编号公式)
+        if eq1['equation_type'] == 'numbered' and eq2['equation_type'] == 'numbered':
+            try:
+                num1 = int(re.search(r'\d+', eq1['equation_number']).group(0))
+                num2 = int(re.search(r'\d+', eq2['equation_number']).group(0))
+                if abs(num1 - num2) == 1:
+                    score += 0.2
+            except:
+                pass
+        
+        return min(score, 1.0)
+    
+    equation_groups = []
+    if equations_list:
+        # 使用贪心算法分组
+        remaining = list(equations_list)
+        
+        while remaining:
+            # 开始新组
+            current_group = [remaining.pop(0)]
+            
+            # 尝试添加相似的公式到当前组 (最多4个)
+            while len(current_group) < 4 and remaining:
+                # 计算当前组与剩余公式的平均相似度
+                best_idx = -1
+                best_score = 0.4  # 最低阈值
+                
+                for i, eq in enumerate(remaining):
+                    # 计算与当前组所有公式的平均相似度
+                    similarities = [calculate_equation_similarity(eq, group_eq) 
+                                   for group_eq in current_group]
+                    avg_similarity = sum(similarities) / len(similarities)
+                    
+                    if avg_similarity > best_score:
+                        best_score = avg_similarity
+                        best_idx = i
+                
+                # 如果找到足够相似的公式，添加到组中
+                if best_idx >= 0:
+                    current_group.append(remaining.pop(best_idx))
+                else:
+                    break
+            
+            # 生成组描述
+            if len(current_group) == 1:
+                group_desc = current_group[0]['description']
+                group_type = "single"
+                similarity = 1.0
+            else:
+                # 多个公式组
+                # 检查是否都是编号公式
+                all_numbered = all(eq['equation_type'] == 'numbered' for eq in current_group)
+                
+                if all_numbered:
+                    # 提取编号
+                    numbers = []
+                    for eq in current_group:
+                        match = re.search(r'\d+', eq['equation_number'])
+                        if match:
+                            numbers.append(int(match.group(0)))
+                    
+                    if numbers:
+                        numbers.sort()
+                        if numbers[-1] - numbers[0] == len(numbers) - 1:
+                            # 连续编号
+                            group_desc = f"Equation {numbers[0]}-{numbers[-1]}: {current_group[0]['description'].split(':')[-1].strip() if ':' in current_group[0]['description'] else '相关公式'}"
+                        else:
+                            # 非连续编号
+                            num_str = ','.join(map(str, numbers))
+                            group_desc = f"Equation {num_str}: {current_group[0]['description'].split(':')[-1].strip() if ':' in current_group[0]['description'] else '相关公式'}"
+                    else:
+                        group_desc = f"相关公式组 ({len(current_group)}个)"
+                else:
+                    # 混合或未编号公式
+                    # 使用第一个公式的描述作为基础
+                    base_desc = current_group[0]['description']
+                    group_desc = f"{base_desc}等相关公式 ({len(current_group)}个)"
+                
+                group_type = "related"
+                # 计算组内平均相似度
+                if len(current_group) > 1:
+                    similarities = []
+                    for i in range(len(current_group)):
+                        for j in range(i+1, len(current_group)):
+                            similarities.append(calculate_equation_similarity(
+                                current_group[i], current_group[j]
+                            ))
+                    similarity = sum(similarities) / len(similarities) if similarities else 0.5
+                else:
+                    similarity = 1.0
+            
+            equation_groups.append({
+                "group_type": group_type,
+                "items": current_group,
+                "group_description": group_desc,
+                "similarity_score": similarity,
+                "pages": [eq['page'] for eq in current_group]
+            })
+    
+    return {
+        "figure_groups": figure_groups,
+        "equation_groups": equation_groups
+    }
+
 
 def deduplicate_sections(sections: List[SectionIntent], figures_list: List[dict] = None) -> List[SectionIntent]:
     """
@@ -670,6 +1179,116 @@ def validate_and_fix_priority_questions(outline: Outline, figures_list: List[dic
     
     return outline
 
+def validate_equation_coverage(outline: Outline, equations_list: List[dict] = None) -> Outline:
+    """
+    验证outline是否覆盖了所有检测到的公式
+    如果缺失，自动补充
+    
+    Args:
+        outline: 当前的大纲
+        equations_list: 公式扫描器检测到的公式清单
+    
+    Returns:
+        更新后的outline
+    """
+    if not equations_list:
+        print("✅ 未检测到公式，跳过公式覆盖验证")
+        return outline
+    
+    def extract_equation_identifier(title: str) -> Optional[str]:
+        """从section标题中提取公式标识（编号或描述）"""
+        # 模式1: 提取编号 "Equation 1", "Eq. 2"
+        patterns = [
+            r'Equation\s+(\d+[a-z]?)',
+            r'Eq\.\s*(\d+[a-z]?)',
+            r'式\s*\(?(\d+[a-z]?)\)?'
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, title, re.IGNORECASE)
+            if match:
+                return match.group(1)
+        
+        # 模式2: 匹配关键描述词
+        description_keywords = [
+            '损失函数', '更新规则', '后验概率', '先验分布', '似然函数',
+            '优化目标', '约束条件', '概率计算', '期望值', '方差计算',
+            '熵计算', '误差函数', '预测模型', '估计量', '核心公式'
+        ]
+        
+        for keyword in description_keywords:
+            if keyword in title:
+                return keyword
+        
+        return None
+    
+    def create_equation_section(eq: dict) -> SectionIntent:
+        """为缺失的公式创建section"""
+        # 生成标题
+        if eq['equation_type'] == 'numbered':
+            section_title = f"{eq['description']}"  # 例如: "Equation 1: 损失函数"
+        else:
+            section_title = f"{eq['description']}"  # 例如: "损失函数"
+        
+        # 生成两个优先问题
+        what_q = SubQuestion(
+            question=f"{section_title}的完整数学表达式是什么？各个符号、变量、参数分别代表什么含义？",
+            question_type="what"
+        )
+        principle_q = SubQuestion(
+            question=f"{section_title}的推导逻辑和计算原理是怎样的？这个公式的理论基础是什么？",
+            question_type="principle"
+        )
+        
+        return SectionIntent(
+            section_title=section_title,
+            target_pages=[eq['page']],
+            filename_slug=f"eq_{eq.get('equation_number', 'auto')}_{eq['description'][:20]}",
+            type="equation",
+            sub_questions=[what_q, principle_q]
+        )
+    
+    # 提取已有的公式section
+    equation_sections = [s for s in outline.sections if s.type == 'equation']
+    
+    # 提取已分析的公式标识
+    analyzed_eqs = set()
+    for section in equation_sections:
+        eq_id = extract_equation_identifier(section.section_title)
+        if eq_id:
+            analyzed_eqs.add(eq_id)
+    
+    # 检测缺失的公式
+    missing_eqs = []
+    for eq in equations_list:
+        # 对于编号公式，用编号作为标识
+        if eq['equation_type'] == 'numbered':
+            eq_id = eq['equation_number']
+        else:
+            # 对于未编号公式，用描述作为标识
+            eq_id = eq['description']
+        
+        if eq_id and eq_id not in analyzed_eqs:
+            missing_eqs.append(eq)
+    
+    # 自动补充缺失的公式section
+    if missing_eqs:
+        print(f"⚠️  检测到{len(missing_eqs)}个未分析的公式，自动补充...")
+        for eq in missing_eqs:
+            补充section = create_equation_section(eq)
+            outline.sections.append(补充section)
+            print(f"  🔧 补充: {补充section.section_title}")
+    else:
+        print(f"✅ 所有检测到的公式都有对应分析section")
+    
+    # 统计信息
+    total_equations = len(equations_list)
+    analyzed_equations = len(equation_sections)
+    print(f"🔢 公式覆盖验证: 检测到{total_equations}个公式，生成了{analyzed_equations + len(missing_eqs)}个公式分析section")
+    
+    return outline
+
+
 def call_api_with_retry(client, model, messages, response_format=None, max_retries=15):
     import json
     retries = 0
@@ -721,54 +1340,118 @@ class ArchitectAgent:
     def __init__(self, client: OpenAI):
         self.client = client
 
-    def generate_outline(self, text_content: str, figures_list: List[dict] = None, include_appendix: bool = False) -> Outline:
+    def generate_outline(self, text_content: str, figures_list: List[dict] = None, equations_list: List[dict] = None, visual_groups: dict = None, include_appendix: bool = False) -> Outline:
         """
         生成论文阅读大纲
         Args:
             text_content: 论文文本内容（前几页）
             figures_list: 扫描得到的图表清单 [{"page": int, "caption": str}, ...]
+            equations_list: 扫描得到的公式清单 [{"page": int, "equation_type": str, "description": str}, ...]
+            visual_groups: 智能分组后的视觉元素 {"figure_groups": [...], "equation_groups": [...]}
             include_appendix: 是否包含附录
         """
         appendix_instruction = "请分析附录 (Appendix) 部分。" if include_appendix else "请忽略附录 (Appendix)，专注于正文。"
         
-        # 构建图表清单文本
-        figures_text = ""
-        if figures_list:
-            figures_text = "\n\n## 已检测到的图表清单（必须全部分析）\n"
-            for fig in figures_list:
-                figures_text += f"- 第{fig['page']+1}页: {fig['caption']}\n"
-            figures_text += "\n**重要**: 以上所有图表都必须在你的分析大纲中体现。\n"
+        # 构建视觉元素清单文本（优先使用分组信息）
+        visual_elements_text = ""
+        
+        if visual_groups:
+            # 使用分组后的信息
+            figure_groups = visual_groups.get("figure_groups", [])
+            equation_groups = visual_groups.get("equation_groups", [])
+            
+            if figure_groups:
+                visual_elements_text = "\n\n## 已检测到的图表清单（智能分组）\n"
+                for group in figure_groups:
+                    pages_str = ','.join([str(p+1) for p in group['pages']])
+                    if group['group_type'] == 'subfigures':
+                        visual_elements_text += f"- 第{pages_str}页: **{group['group_description']}** (子图组，{len(group['items'])}个)\n"
+                    else:
+                        visual_elements_text += f"- 第{pages_str}页: {group['group_description']}\n"
+            
+            if equation_groups:
+                visual_elements_text += "\n## 已检测到的公式清单（智能分组）\n"
+                numbered_groups = [g for g in equation_groups if any(eq['equation_type'] == 'numbered' for eq in g['items'])]
+                unnumbered_groups = [g for g in equation_groups if all(eq['equation_type'] == 'unnumbered' for eq in g['items'])]
+                
+                if numbered_groups:
+                    visual_elements_text += "\n### 编号公式组\n"
+                    for group in numbered_groups:
+                        pages_str = ','.join([str(p+1) for p in set(group['pages'])])
+                        if group['group_type'] == 'related':
+                            similarity = group.get('similarity_score', 0)
+                            visual_elements_text += f"- 第{pages_str}页: **{group['group_description']}** (关联组，相似度:{similarity:.2f})\n"
+                        else:
+                            visual_elements_text += f"- 第{pages_str}页: {group['group_description']}\n"
+                
+                if unnumbered_groups:
+                    visual_elements_text += "\n### 未编号公式组\n"
+                    for group in unnumbered_groups:
+                        pages_str = ','.join([str(p+1) for p in set(group['pages'])])
+                        if group['group_type'] == 'related':
+                            similarity = group.get('similarity_score', 0)
+                            visual_elements_text += f"- 第{pages_str}页: **{group['group_description']}** (关联组，相似度:{similarity:.2f})\n"
+                        else:
+                            visual_elements_text += f"- 第{pages_str}页: {group['group_description']}\n"
+        else:
+            # 降级到旧逻辑（未提供分组信息时）
+            if figures_list:
+                visual_elements_text = "\n\n## 已检测到的图表清单（必须全部分析）\n"
+                for fig in figures_list:
+                    visual_elements_text += f"- 第{fig['page']+1}页: {fig['caption']}\n"
+            
+            if equations_list:
+                visual_elements_text += "\n## 已检测到的公式清单（必须全部分析）\n"
+                visual_elements_text += "\n### 编号公式\n"
+                numbered_eqs = [eq for eq in equations_list if eq['equation_type'] == 'numbered']
+                if numbered_eqs:
+                    for eq in numbered_eqs:
+                        visual_elements_text += f"- 第{eq['page']+1}页: {eq['description']}\n"
+                else:
+                    visual_elements_text += "- (未检测到编号公式)\n"
+                
+                visual_elements_text += "\n### 重要的未编号公式\n"
+                unnumbered_eqs = [eq for eq in equations_list if eq['equation_type'] == 'unnumbered']
+                if unnumbered_eqs:
+                    for eq in unnumbered_eqs:
+                        visual_elements_text += f"- 第{eq['page']+1}页: {eq['description']}\n"
+                else:
+                    visual_elements_text += "- (未检测到重要未编号公式)\n"
+        
+        if visual_elements_text:
+            visual_elements_text += "\n**强制要求**: 以上所有图表和公式（及其分组）都必须在你的分析大纲中体现！\n"
+            if visual_groups:
+                visual_elements_text += "**分组说明**: \n"
+                visual_elements_text += "- 子图组（如Fig 1a-c）应创建单个section统一分析\n"
+                visual_elements_text += "- 关联公式组应创建单个section，问题需涵盖组内所有公式\n"
+                visual_elements_text += "- 相似度高的公式组说明它们主题相关，应一起分析\n"
 
         system_prompt = f"""
         你是一位学术架构师。你的目标是模拟一位"好奇且严谨的研究生"，通读论文摘要和目录后，构建一个**有层级、有标号**的深度研读提纲。
 
         ## 核心指令
 
-        ### ⚠️ 第一优先级：完整覆盖所有视觉元素
+        ### ⚠️ 第一优先级：完整覆盖所有视觉元素（图表+公式）
         **强制要求**：在设计任何问题之前，你必须：
         1. **图表清单核查**：检查下方提供的图表清单，每一个图、表都必须在你的大纲中有对应的section
-        2. **逐一对应**：为每个图表创建专门的分析section（如"3.1.1 Fig 1 任务范式"，"3.1.2 Fig 2 神经响应"）
-        3. **公式全面扫描**：⚠️ 重要！你必须**主动扫描文本**寻找所有公式：
-           
-           **A. 编号公式（优先）**：
-           - 寻找模式："Equation 1", "Eq. 2", 或独立编号如"(1)", "(2)"...
-           - Marker已将公式转换为LaTeX格式（$$...$$），编号通常在公式下方或旁边
-           - 为每组1-3个相关公式创建分析section（如"3.2.1 Equation 1-3: 计算公式"）
-           
-           **B. 未编号显示公式（补充）**：
-           - 识别重要的未编号显示公式（Marker转换为 $$...$$ 格式）
-           - **按行文顺序**为这些公式创建section
-           - 根据上下文给予描述性标题（如"3.2.4 损失函数定义", "4.1.2 贝叶斯更新公式"）
-           - 1-3个主题相关的未编号公式可以合并分析
-           
-           **C. 公式section的标题格式**：
-           - 编号公式：`"3.2.1 Equation 1-3: 描述"`
-           - 未编号公式：`"3.2.2 核心损失函数"` 或 `"3.2.3 后验概率计算"`
-           - 按出现顺序编号sub-section
-           
-           - **即使图表清单中没有公式，也要扫描文本！**
+        2. **公式清单核查**：检查下方提供的公式清单，每一个公式都必须在你的大纲中有对应的section
+        3. **逐一对应**：为每个图表和公式创建专门的分析section
+           - 图表示例："3.1.1 Fig 1 任务范式"，"3.1.2 Fig 2 神经响应"
+           - 编号公式示例："3.2.1 Equation 1-3: 计算步骤"
+           - 未编号公式示例："3.2.2 损失函数定义"，"4.1.2 贝叶斯更新公式"
+        
+        4. **分组策略**：
+           - **子图自动分组**：Fig 1a, 1b, 1c → 合并为 "Fig 1a-c: ..."
+           - **相关公式分组**：1-3个相关编号公式可合并（如 "Equation 1-3: ..."）
+           - **未编号公式**：1-3个主题相关的未编号公式可合并
+           - 所有分组都作为对应部分的子section
+        
+        5. **公式section标题格式**：
+           - 编号公式："3.2.1 Equation 1: 描述" 或 "3.2.1 Equation 1-3: 描述"
+           - 未编号公式："3.2.2 核心损失函数" 或 "4.1.3 后验概率计算"
+           - 按文章行文顺序编号sub-section
 
-        {figures_text}
+        {visual_elements_text}
 
         ### 第二优先级：IMRAD + Appendix 结构完整性
         1. {appendix_instruction}
@@ -1272,6 +1955,44 @@ def main():
     figures_list = figure_scanner.scan_all_figures()
     figure_scanner.close()
     print(f"✅ 检测到 {len(figures_list)} 个图表/表格")
+    
+    # NEW: Scan all equations (only if using Marker)
+    equations_list = []
+    if USE_MARKER:
+        print("🔢 公式扫描: 正在识别Marker输出中的所有公式...")
+        equation_scanner = EquationScanner(all_pages_text)
+        equations_list = equation_scanner.scan_all_equations()
+        print(f"✅ 检测到 {len(equations_list)} 个公式")
+        if equations_list:
+            numbered_count = sum(1 for eq in equations_list if eq['equation_type'] == 'numbered')
+            unnumbered_count = sum(1 for eq in equations_list if eq['equation_type'] == 'unnumbered')
+            print(f"   - 编号公式: {numbered_count}")
+            print(f"   - 重要未编号公式: {unnumbered_count}")
+    else:
+        print("ℹ️  公式扫描: PyMuPDF模式不支持公式识别，跳过公式扫描")
+    
+    # NEW: 智能分组视觉元素
+    print("🔗 智能分组: 正在对图表和公式进行智能分组...")
+    visual_groups = group_visual_elements(figures_list, equations_list)
+    
+    # 打印分组统计
+    if visual_groups:
+        fig_groups = visual_groups.get("figure_groups", [])
+        eq_groups = visual_groups.get("equation_groups", [])
+        
+        if fig_groups:
+            subfig_count = sum(1 for g in fig_groups if g['group_type'] == 'subfigures')
+            print(f"   - 图表分组: {len(fig_groups)}个组")
+            if subfig_count > 0:
+                print(f"     * 子图组: {subfig_count}个")
+        
+        if eq_groups:
+            related_count = sum(1 for g in eq_groups if g['group_type'] == 'related')
+            total_eqs_in_groups = sum(len(g['items']) for g in eq_groups if g['group_type'] == 'related')
+            print(f"   - 公式分组: {len(eq_groups)}个组")
+            if related_count > 0:
+                avg_group_size = total_eqs_in_groups / related_count if related_count > 0 else 0
+                print(f"     * 关联组: {related_count}个 (平均每组{avg_group_size:.1f}个公式)")
 
     # 2. Architect - 分批处理
     print("架构师: 正在分批生成深度阅读大纲...")
@@ -1298,6 +2019,8 @@ def main():
             batch_outline = architect.generate_outline(
                 batch_text, 
                 figures_list=figures_list if batch_idx == 0 else None,  # 只在第一批传入图表列表
+                equations_list=equations_list if batch_idx == 0 else None,  # 只在第一批传入公式列表
+                visual_groups=visual_groups if batch_idx == 0 else None,  # 只在第一批传入分组信息
                 include_appendix=args.include_appendix
             )
             
@@ -1318,6 +2041,10 @@ def main():
             sections=unique_sections
         )
         
+        # 验证公式覆盖（如果有公式）
+        if equations_list:
+            temp_outline = validate_equation_coverage(temp_outline, equations_list)
+        
         # 验证并补充优先问题
         outline = validate_and_fix_priority_questions(temp_outline, figures_list)
         
@@ -1333,6 +2060,81 @@ def main():
         return
 
     print(f"计划已生成: 共 {len(outline.sections)} 个部分需要分析。")
+    
+    # 打印问题架构预览
+    print("\n" + "="*80)
+    print("📋 问题架构预览 (Question Architecture Preview)")
+    print("="*80)
+    print(f"\n论文标题: {outline.paper_title}")
+    print(f"总结: {outline.summary[:100]}..." if len(outline.summary) > 100 else f"总结: {outline.summary}")
+    print(f"\n共 {len(outline.sections)} 个分析部分:")
+    print("-"*80)
+    
+    for idx, section in enumerate(outline.sections, 1):
+        # Section标题和基本信息
+        section_icon = "📊" if section.type == "figure" else "🔢" if section.type == "equation" else "📝"
+        print(f"\n{section_icon} [{idx}/{len(outline.sections)}] {section.section_title}")
+        print(f"   类型: {section.type} | 页码: {section.target_pages}")
+        
+        # Sub-questions
+        if section.sub_questions:
+            print(f"   包含 {len(section.sub_questions)} 个子问题:")
+            for sq_idx, sub_q in enumerate(section.sub_questions, 1):
+                # 问题类型标记
+                q_type_icon = {
+                    'what': '❓',
+                    'principle': '⚙️',
+                    'phenomenon': '👁️',
+                    'mechanism': '🔬',
+                    'critique': '💭'
+                }.get(sub_q.question_type, '📌')
+                
+                # 优先问题标记
+                is_priority = sub_q.question_type in ['what', 'principle']
+                priority_marker = " [优先]" if is_priority else ""
+                
+                # 截断问题文本
+                q_preview = sub_q.question[:60] + "..." if len(sub_q.question) > 60 else sub_q.question
+                
+                print(f"      {sq_idx}. {q_type_icon} ({sub_q.question_type}{priority_marker}) {q_preview}")
+        else:
+            print(f"   ⚠️  无子问题")
+    
+    print("\n" + "-"*80)
+    
+    # 统计信息
+    total_questions = sum(len(s.sub_questions) for s in outline.sections)
+    figure_sections = sum(1 for s in outline.sections if s.type == 'figure')
+    equation_sections = sum(1 for s in outline.sections if s.type == 'equation')
+    text_sections = sum(1 for s in outline.sections if s.type == 'text')
+    
+    priority_questions = sum(
+        1 for s in outline.sections 
+        for sq in s.sub_questions 
+        if sq.question_type in ['what', 'principle']
+    )
+    
+    print(f"\n📊 统计:")
+    print(f"   - 总问题数: {total_questions}")
+    print(f"   - 图表分析: {figure_sections} sections")
+    print(f"   - 公式分析: {equation_sections} sections")
+    print(f"   - 文本分析: {text_sections} sections")
+    print(f"   - 优先问题: {priority_questions} (是什么+原理)")
+    
+    print("\n" + "="*80)
+    print("⏸️  预览完成。按 Ctrl+C 可中止，或等待5秒后自动继续...")
+    print("="*80)
+    
+    # 给用户5秒查看时间
+    import time
+    try:
+        time.sleep(5)
+    except KeyboardInterrupt:
+        print("\n\n⏹️  用户中止执行")
+        pdf_proc.close()
+        return
+    
+    print("\n▶️  开始执行分析...\n")
 
     # 3. Analyst loop
     analyst = AnalystAgent(client)
